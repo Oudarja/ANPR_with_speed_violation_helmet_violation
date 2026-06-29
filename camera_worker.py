@@ -578,7 +578,7 @@ _SIGNAL_MAP = {
 
 _SIGNAL_POLL_INTERVAL = 2
 _SIGNAL_DEBOUNCE_SEC  = 3.0
-HELEMET_CONF_THRESHOLD = 0.5 
+# HELEMET_CONF_THRESHOLD = 0.5 
 
 classNames = ['With Helmet', 'Without Helmet']
 
@@ -762,7 +762,7 @@ def run_camera(camera_info: dict, roi_polygon: np.ndarray, preview_queue=None):
         PREVIEW_EVERY = 10
         frame_count   = 0
 
-        #-----helmet violation---------- 
+        #------------------------helmet violation----------------------------
         helmet_violation_ids = set()
         # ── Add to state initialization (alongside other dicts) ──
         helmet_vote_buffer = {}   # track_id → {"with": int, "without": int, "decided": bool}
@@ -1002,7 +1002,6 @@ def run_camera(camera_info: dict, roi_polygon: np.ndarray, preview_queue=None):
                                     (x1, y1-28), cv2.FONT_HERSHEY_SIMPLEX,
                                     0.6, (0, 140, 255), 2)
                     
-                    # ---------------- Helmet violation for motorbikes only----------------
                     # ---------------- Helmet violation for motorbikes only ----------------
                     if stored_cls == "motorbike" and track_id not in helmet_violation_ids:
 
@@ -1019,7 +1018,6 @@ def run_camera(camera_info: dict, roi_polygon: np.ndarray, preview_queue=None):
                         # ── Skip if already decided (with helmet = safe, permanently) ──
                         if vote["decided"]:
                             pass  # already confirmed "With Helmet" — never re-check
-
                         else:
                             # ── Only run model every 3rd frame to save CPU ──
                             total_votes = vote["with"] + vote["without"]
@@ -1143,7 +1141,7 @@ def run_camera(camera_info: dict, roi_polygon: np.ndarray, preview_queue=None):
                     track_plate_buffer.pop(tid, None)
                     track_last_position.pop(tid, None)
                     track_speed_history.pop(tid, None)
-                    helmet_vote_buffer.pop(tid, None)   # ← ADD THIS
+                    helmet_vote_buffer.pop(tid, None) 
                     track_color_buffer.pop(tid, None)
                     clear_vote_store(tid)
 
