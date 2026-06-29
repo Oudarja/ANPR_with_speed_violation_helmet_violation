@@ -738,7 +738,7 @@ def run_camera(camera_info: dict, roi_polygon: np.ndarray, preview_queue=None):
         counts              = {v: 0 for v in VEHICLE_CLASSES.values()}
         counted_ids         = set()
         speed_violation_ids = set()
-        helmet_violation_ids = set()
+
         track_plate_buffer  = {}
         track_last_position = {}
         track_speed_history = {}
@@ -761,6 +761,13 @@ def run_camera(camera_info: dict, roi_polygon: np.ndarray, preview_queue=None):
 
         PREVIEW_EVERY = 10
         frame_count   = 0
+
+        #-----helmet violation---------- 
+        helmet_violation_ids = set()
+        # ── Add to state initialization (alongside other dicts) ──
+        helmet_vote_buffer = {}   # track_id → {"with": int, "without": int, "decided": bool}
+        HELMET_VOTE_FRAMES = 3    # must see N frames before deciding
+        HELMET_VOTE_MAJORITY = 2  # at least this many must agree on "without helmet"
 
         print(f"{TAG} ✅ Ready. Processing...")
         
@@ -996,68 +1003,94 @@ def run_camera(camera_info: dict, roi_polygon: np.ndarray, preview_queue=None):
                                     0.6, (0, 140, 255), 2)
                     
                     # ---------------- Helmet violation for motorbikes only----------------
+                    # ---------------- Helmet violation for motorbikes only ----------------
                     if stored_cls == "motorbike" and track_id not in helmet_violation_ids:
-    
-                        # 1. Crop the motorbike region from the full 1280×720 frame
-                        # vcrop = frame_resized[y1:y2, x1:x2]
 
-                        expand_top = int((y2 - y1) * 0.6)   # 60% extra height
-                        ny1 = max(0, y1 - expand_top)
-                        ny2 = y2
-                        nx1 = max(0, x1)
-                        nx2 = min(frame_resized.shape[1], x2)
+                        # ── Initialize vote buffer for this track ──
+                        if track_id not in helmet_vote_buffer:
+                            helmet_vote_buffer[track_id] = {
+                                "with": 0, 
+                                "without": 0, 
+                                "decided": False
+                            }
 
-                        vcrop = frame_resized[ny1:ny2, nx1:nx2]
-                                                
-                        if vcrop.size > 0:
-                            
-                            # 2. Run best.pt on the crop
-                            #    Model finds helmet/no-helmet boxes INSIDE the crop
-                            #    Coordinates returned are relative to vcrop, NOT frame_resized
-                            #     vcrop = cv2.resize(
-                            #     vcrop,
-                            #     None,
-                            #     fx=2,
-                            #     fy=2,
-                            #     interpolation=cv2.INTER_CUBIC
-                            # )
+                        vote = helmet_vote_buffer[track_id]
 
-                            cv2.imwrite(f"uploads/test_motorbike/debug_crop_{track_id}.jpg", vcrop)
-                            helmet_results = detect_helmet(vcrop)
+                        # ── Skip if already decided (with helmet = safe, permanently) ──
+                        if vote["decided"]:
+                            pass  # already confirmed "With Helmet" — never re-check
 
-                            for hr in helmet_results:
-                                for hbox in hr.boxes:
-                                    
-                                    hconf = float(hbox.conf[0])
-                                    print("hconf result: ", hconf)
-                                    # if hconf < HELEMET_CONF_THRESHOLD:  # 0.5 — skip low confidence
-                                    #     continue
+                        else:
+                            # ── Only run model every 3rd frame to save CPU ──
+                            total_votes = vote["with"] + vote["without"]
+                            if total_votes < HELMET_VOTE_FRAMES:
 
-                                    hcls = int(hbox.cls[0])
-                                    print("HCLS value",hcls)
-                                    if hcls == 0:   # 0=With Helmet (safe), 1=Without Helmet (violation)
-                                        continue
+                                # Expand crop upward to capture the rider's head
+                                expand_top = int((y2 - y1) * 0.8)
+                                ny1 = max(0, y1 - expand_top)
+                                ny2 = y2
+                                nx1 = max(0, x1)
+                                nx2 = min(frame_resized.shape[1], x2)
+                                vcrop = frame_resized[ny1:ny2, nx1:nx2]
+                                # store in test_mototrbike
+                                cv2.imwrite(
+                                    f"uploads/test_motorbike/debug_crop_{track_id}.jpg",
+                                    vcrop
+                                )
 
-                                    # 3. Box coords are relative to vcrop
-                                    hx1, hy1, hx2, hy2 = map(int, hbox.xyxy[0])
-                                    hw, hh = hx2 - hx1, hy2 - hy1
+                                if vcrop.size > 0:
+                                    helmet_results = detect_helmet(vcrop)
 
-                                    # 4. Remap to full frame coordinates
-                                    #    vcrop started at (x1, y1) in frame_resized
-                                    global_x1 = nx1 + hx1   # ✅ correct
-                                    global_y1 = ny1 + hy1   # ✅ correct
+                                    frame_has_without = False
+                                    frame_has_with    = False
 
-                                    # 5. Draw on full frame (using global coords)
-                                    cvzone.cornerRect(frame_resized,
-                                                    (global_x1, global_y1, hw, hh))
-                                    cvzone.putTextRect(
-                                        frame_resized,
-                                        f'No Helmet {math.ceil(hconf * 100) / 100}',
-                                        (max(0, global_x1), max(35, global_y1)),
-                                        scale=1, thickness=1
-                                    )
+                                    for hr in helmet_results:
+                                        for hbox in hr.boxes:
+                                            hconf = float(hbox.conf[0])
+                                            # if hconf < HELEMET_CONF_THRESHOLD:
+                                            #     continue
+                                            hcls = int(hbox.cls[0])
+                                            if hcls == 1:
+                                                frame_has_without = True
+                                            elif hcls == 0:
+                                                frame_has_with = True
+
+                                    # ── Count this frame's vote ──
+                                    # If both detected, "with helmet" wins (safer default)
+                                    if frame_has_with:
+                                        vote["with"] += 1
+                                    elif frame_has_without:
+                                        vote["without"] += 1
+                                    # If nothing detected → don't count (model uncertain)
+
+                            # ── Check if we have enough votes to decide ──
+                            total_votes = vote["with"] + vote["without"]
+
+                            if total_votes >= HELMET_VOTE_FRAMES:
+
+                                if vote["with"] >= HELMET_VOTE_MAJORITY:
+                                    # ── Even ONE "with helmet" vote → mark as SAFE permanently ──
+                                    # This prevents a safe rider from ever being flagged
+                                    vote["decided"] = True
+                                    print(f"{TAG} ✅ Helmet CONFIRMED for track {track_id} "
+                                        f"(with={vote['with']}, without={vote['without']})")
+
+                                elif vote["without"] >= HELMET_VOTE_MAJORITY:
+                                    # ── Strong majority says NO helmet → violation ──
+                                    helmet_violation_ids.add(track_id)
+                                    vote["decided"] = True
+
+                                    # Use the expanded crop for saving
+                                    expand_top = int((y2 - y1) * 0.8)
+                                    ny1 = max(0, y1 - expand_top)
+                                    ny2 = y2
+                                    nx1 = max(0, x1)
+                                    nx2 = min(frame_resized.shape[1], x2)
+                                    vcrop = frame_resized[ny1:ny2, nx1:nx2]
+
                                     hv_path = os.path.join(vio_dir, f"h{track_id}_vehicle.jpg")
                                     hp_path = os.path.join(vio_dir, f"h{track_id}_plate.jpg")
+
                                     if vcrop.size > 0:
                                         cv2.imwrite(hv_path, vcrop)
                                     if buf and buf["crop"] is not None:
@@ -1074,14 +1107,27 @@ def run_camera(camera_info: dict, roi_polygon: np.ndarray, preview_queue=None):
                                         vehicle_class=stored_cls,
                                         plate_img_path=_normalize_db_path(hp_path) if buf else None,
                                         vehicle_img_path=_normalize_db_path(hv_path),
-                                        confidence=hconf,
+                                        confidence=vote["without"] / total_votes,  # vote ratio as confidence
                                         clip_path=clip_path,
                                         vehicle_color=vehicle_color
                                     )
-                                    helmet_violation_ids.add(track_id)
-                                    # break
-                                if track_id in helmet_violation_ids:
-                                    break
+
+                                    print(f"{TAG} 🚨 HELMET VIOLATION | track:{track_id} "
+                                        f"(with={vote['with']}, without={vote['without']})")
+
+                                    # Draw on frame
+                                    hx1_draw = nx1
+                                    hy1_draw = ny1
+                                    hw_draw  = nx2 - nx1
+                                    hh_draw  = ny2 - ny1
+                                    cvzone.cornerRect(frame_resized,
+                                                    (hx1_draw, hy1_draw, hw_draw, hh_draw))
+                                    cvzone.putTextRect(
+                                        frame_resized,
+                                        f'No Helmet ({vote["without"]}/{total_votes})',
+                                        (max(0, hx1_draw), max(35, hy1_draw)),
+                                        scale=1, thickness=1
+                                    )
 
                     active_tracks[track_id] = [(x1, y1, x2, y2), stored_cls]
                 else:
@@ -1097,6 +1143,7 @@ def run_camera(camera_info: dict, roi_polygon: np.ndarray, preview_queue=None):
                     track_plate_buffer.pop(tid, None)
                     track_last_position.pop(tid, None)
                     track_speed_history.pop(tid, None)
+                    helmet_vote_buffer.pop(tid, None)   # ← ADD THIS
                     track_color_buffer.pop(tid, None)
                     clear_vote_store(tid)
 
