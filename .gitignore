@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.anpr_time/
+
+# Video files
+*.ts
+
+# Images
+*.png
